@@ -1,0 +1,1082 @@
+import json
+import os
+import tkinter as tk
+from tkinter import messagebox
+
+ARCHIVO_JUGADORES = "jugadores.json"
+
+# =====================================================================
+# 1. CLASES Y CONFIGURACIÓN DE FACCIONES (POO PURA)
+# =====================================================================
+class Faccion:
+    def __init__(self, nombre, ruta_base, ruta_muro, img_torre_b, img_torre_p, img_torre_m,
+                 img_uni_s, img_uni_t, img_uni_r, ventaja):
+        self.nombre       = nombre
+        self.ruta_base    = ruta_base
+        self.ruta_muro    = ruta_muro
+        self.torre_basica = img_torre_b
+        self.torre_pesada = img_torre_p
+        self.torre_magica = img_torre_m
+        self.unidad_soldado = img_uni_s
+        self.unidad_tanque  = img_uni_t
+        self.unidad_rapida  = img_uni_r
+        self.ventaja = ventaja
+
+fac_medieval = Faccion(
+    nombre="Medieval",
+    ruta_base="assets/medieval/base.png",
+    ruta_muro="assets/medieval/muro.png",
+    img_torre_b="assets/medieval/torre_flechas.png",
+    img_torre_p="assets/medieval/catapulta.png",
+    img_torre_m="assets/medieval/torre_mago.png",
+    img_uni_s="assets/medieval/caballero.png",
+    img_uni_t="assets/medieval/ariete.png",
+    img_uni_r="assets/medieval/jinete.png",
+    ventaja="Muros con un 5% más de vida máxima (Balanceado)."
+)
+
+fac_robotica = Faccion(
+    nombre="Robótica",
+    ruta_base="assets/robotica/generador.png",
+    ruta_muro="assets/robotica/campo_fuerza.png",
+    img_torre_b="assets/robotica/laser.png",
+    img_torre_p="assets/robotica/cañon_plasma.png",
+    img_torre_m="assets/robotica/torre_pulso.png",
+    img_uni_s="assets/robotica/drone.png",
+    img_uni_t="assets/robotica/mecha.png",
+    img_uni_r="assets/robotica/moto_cyber.png",
+    ventaja="Las unidades rápidas se mueven 1 casilla extra cada 3 turnos."
+)
+
+fac_oscura = Faccion(
+    nombre="Oscura",
+    ruta_base="assets/oscura/portal.png",
+    ruta_muro="assets/oscura/espinas.png",
+    img_torre_b="assets/oscura/gargola.png",
+    img_torre_p="assets/oscura/obelisco.png",
+    img_torre_m="assets/oscura/torre_nigromante.png",
+    img_uni_s="assets/oscura/esqueleto.png",
+    img_uni_t="assets/oscura/golem.png",
+    img_uni_r="assets/oscura/sombra.png",
+    ventaja="Las torres mágicas infligen un 2% de daño persistente por turno."
+)
+
+LISTA_FACCIONES = [fac_medieval, fac_robotica, fac_oscura]
+
+
+# =====================================================================
+# 2. MODELADO DE ESTRUCTURAS DEFENSIVAS (ROL DEL DEFENSOR)
+# =====================================================================
+class BaseEstructura:
+    def __init__(self, nombre, costo, vida, ruta_imagen):
+        self.nombre      = nombre
+        self.costo       = costo
+        self.vida        = vida
+        self.vida_maxima = vida
+        self.ruta_imagen = ruta_imagen
+
+class BaseCentral(BaseEstructura):
+    def __init__(self, faccion_defensor):
+        super().__init__("Base Central", costo=0, vida=500, ruta_imagen=faccion_defensor.ruta_base)
+
+class Muro(BaseEstructura):
+    def __init__(self, faccion_defensor):
+        vida_base = 150
+        # Ventaja Medieval: muros con 5% más de vida
+        if faccion_defensor.nombre == "Medieval":
+            vida_base = int(vida_base * 1.05)
+        super().__init__("Muro", costo=20, vida=vida_base, ruta_imagen=faccion_defensor.ruta_muro)
+
+class Torre(BaseEstructura):
+    def __init__(self, nombre, costo, vida, daño, alcance, cooldown_habilidad, ruta_imagen):
+        super().__init__(nombre, costo, vida, ruta_imagen)
+        self.daño              = daño
+        self.alcance           = alcance
+        self.cooldown_habilidad = cooldown_habilidad
+        self.contador_turnos   = 0
+        self.habilidad_activa  = False   # se vuelve True cuando el cooldown se cumple
+
+    def avanzar_turno(self):
+        """Incrementa el contador y activa la habilidad si se alcanzó el cooldown."""
+        self.contador_turnos += 1
+        if self.contador_turnos >= self.cooldown_habilidad:
+            self.habilidad_activa = True
+            self.contador_turnos  = 0
+
+    # ---------- Habilidades especiales (una por subclase) ----------
+    def activar_habilidad(self, unidades_en_mapa, log_fn):
+        """Método base; cada subclase lo sobreescribe."""
+        pass
+
+
+class TorreBasica(Torre):
+    """Habilidad: Disparo doble — ataca a DOS unidades distintas en lugar de una."""
+    def __init__(self, faccion_defensor):
+        super().__init__("Torre Básica", costo=50, vida=100, daño=15,
+                         alcance=2, cooldown_habilidad=3,
+                         ruta_imagen=faccion_defensor.torre_basica)
+
+    def activar_habilidad(self, unidades_en_mapa, log_fn):
+        if not self.habilidad_activa:
+            return 0
+        self.habilidad_activa = False
+        objetivos = unidades_en_mapa[:2]          # hasta 2 unidades
+        dano_total = 0
+        for unidad in objetivos:
+            unidad.vida -= self.daño
+            dano_total  += self.daño
+            log_fn(f"⚡ [{self.nombre}] DISPARO DOBLE → {unidad.nombre} -{self.daño} HP (restante: {max(unidad.vida,0)})")
+        return dano_total
+
+
+class TorrePesada(Torre):
+    """Habilidad: Daño en área — golpea a TODAS las unidades presentes en el mapa."""
+    def __init__(self, faccion_defensor):
+        super().__init__("Torre Pesada", costo=120, vida=250, daño=40,
+                         alcance=3, cooldown_habilidad=4,
+                         ruta_imagen=faccion_defensor.torre_pesada)
+
+    def activar_habilidad(self, unidades_en_mapa, log_fn):
+        if not self.habilidad_activa:
+            return 0
+        self.habilidad_activa = False
+        dano_area = self.daño // 2          # 20 de daño en área
+        dano_total = 0
+        for unidad in unidades_en_mapa:
+            unidad.vida -= dano_area
+            dano_total  += dano_area
+            log_fn(f"💥 [{self.nombre}] DAÑO EN ÁREA → {unidad.nombre} -{dano_area} HP (restante: {max(unidad.vida,0)})")
+        return dano_total
+
+
+class TorreMagica(Torre):
+    """Habilidad: Daño persistente (veneno) — aplica marca que quita HP extra cada turno."""
+    def __init__(self, faccion_defensor):
+        super().__init__("Torre Mágica", costo=90, vida=120, daño=10,
+                         alcance=4, cooldown_habilidad=2,
+                         ruta_imagen=faccion_defensor.torre_magica)
+        # Facción Oscura potencia: 2% extra de daño persistente por turno
+        self.daño_persistente = 8
+
+    def activar_habilidad(self, unidades_en_mapa, log_fn):
+        if not self.habilidad_activa:
+            return 0
+        self.habilidad_activa = False
+        dano_total = 0
+        for unidad in unidades_en_mapa:
+            if not hasattr(unidad, 'turnos_veneno'):
+                unidad.turnos_veneno = 0
+            unidad.turnos_veneno += 3       # envenena por 3 turnos
+            unidad.vida -= self.daño_persistente
+            dano_total  += self.daño_persistente
+            log_fn(f"🧪 [{self.nombre}] VENENO → {unidad.nombre} -{self.daño_persistente} HP + 3 turnos veneno")
+        return dano_total
+
+
+# =====================================================================
+# 3. MODELADO DE UNIDADES ATACANTES (ROL DEL ATACANTE)
+# =====================================================================
+class UnidadAtacante:
+    def __init__(self, nombre, costo, vida, daño, velocidad, cooldown_habilidad, ruta_imagen):
+        self.nombre            = nombre
+        self.costo             = costo
+        self.vida              = vida
+        self.vida_maxima       = vida
+        self.daño              = daño
+        self.velocidad         = velocidad
+        self.cooldown_habilidad = cooldown_habilidad
+        self.contador_turnos   = 0
+        self.habilidad_activa  = False
+        self.ruta_imagen       = ruta_imagen
+        self.turnos_veneno     = 0      # usado por TorreMagica
+
+    def avanzar_turno(self):
+        self.contador_turnos += 1
+        if self.contador_turnos >= self.cooldown_habilidad:
+            self.habilidad_activa = True
+            self.contador_turnos  = 0
+        # Aplicar daño de veneno si corresponde
+        if self.turnos_veneno > 0:
+            self.vida          -= 5
+            self.turnos_veneno -= 1
+
+    # ---------- Habilidades especiales (una por subclase) ----------
+    def activar_habilidad(self, base_obj, log_fn):
+        pass
+
+
+class SoldadoBasico(UnidadAtacante):
+    """Habilidad: Ataque doble — inflige el doble de daño a la base en ese turno."""
+    def __init__(self, faccion_atacante):
+        super().__init__("Soldado Básico", costo=30, vida=90, daño=15,
+                         velocidad=1, cooldown_habilidad=3,
+                         ruta_imagen=faccion_atacante.unidad_soldado)
+
+    def activar_habilidad(self, base_obj, log_fn):
+        if not self.habilidad_activa:
+            return 0
+        self.habilidad_activa = False
+        dano = self.daño * 2
+        base_obj.vida -= dano
+        log_fn(f"⚔️  [{self.nombre}] ATAQUE DOBLE → Base -{dano} HP (restante: {max(base_obj.vida,0)})")
+        return dano
+
+
+class Tanque(UnidadAtacante):
+    """Habilidad: Escudo temporal — regenera 40 HP propios (sin superar vida_maxima)."""
+    def __init__(self, faccion_atacante):
+        super().__init__("Tanque", costo=100, vida=250, daño=25,
+                         velocidad=1, cooldown_habilidad=4,
+                         ruta_imagen=faccion_atacante.unidad_tanque)
+
+    def activar_habilidad(self, base_obj, log_fn):
+        if not self.habilidad_activa:
+            return 0
+        self.habilidad_activa = False
+        curacion = 40
+        self.vida = min(self.vida + curacion, self.vida_maxima)
+        log_fn(f"🛡️  [{self.nombre}] ESCUDO — regenera {curacion} HP (vida actual: {self.vida})")
+        return 0   # habilidad defensiva, no daña la base
+
+
+class UnidadRapida(UnidadAtacante):
+    """Habilidad: Velocidad aumentada — se mueve 2 casillas extra ese turno."""
+    def __init__(self, faccion_atacante):
+        super().__init__("Unidad Rápida", costo=55, vida=70, daño=10,
+                         velocidad=3, cooldown_habilidad=2,
+                         ruta_imagen=faccion_atacante.unidad_rapida)
+        self.bonus_velocidad = 0    # casillas extra activas este turno
+
+    def activar_habilidad(self, base_obj, log_fn):
+        if not self.habilidad_activa:
+            return 0
+        self.habilidad_activa = False
+        self.bonus_velocidad  = 2
+        log_fn(f"💨 [{self.nombre}] VELOCIDAD AUMENTADA — +2 casillas extra este turno")
+        return 0
+
+
+# =====================================================================
+# 4. GESTIÓN DE JUGADORES Y PERSISTENCIA JSON
+# =====================================================================
+class Usuario:
+    def __init__(self, username, password, victorias_defensor=0, victorias_atacante=0):
+        self.username           = username
+        self.password           = password
+        self.victorias_defensor = victorias_defensor
+        self.victorias_atacante = victorias_atacante
+
+    def to_dict(self):
+        return {
+            "password": self.password,
+            "victorias_defensor": self.victorias_defensor,
+            "victorias_atacante": self.victorias_atacante
+        }
+
+class GestionUsuarios:
+    def __init__(self):
+        self.jugadores = {}
+        self.cargar_jugadores()
+
+    def cargar_jugadores(self):
+        if os.path.exists(ARCHIVO_JUGADORES):
+            try:
+                with open(ARCHIVO_JUGADORES, 'r', encoding='utf-8') as f:
+                    self.jugadores = json.load(f)
+            except json.JSONDecodeError:
+                self.jugadores = {}
+        else:
+            self.jugadores = {}
+
+    def guardar_jugadores(self):
+        with open(ARCHIVO_JUGADORES, 'w', encoding='utf-8') as f:
+            json.dump(self.jugadores, f, indent=4, ensure_ascii=False)
+
+    def registrar_usuario(self, username, password):
+        if not username or not password:
+            return False, "Los campos no pueden estar vacíos."
+        if username in self.jugadores:
+            return False, "El nombre de usuario ya existe."
+        nuevo = Usuario(username, password)
+        self.jugadores[username] = nuevo.to_dict()
+        self.guardar_jugadores()
+        return True, "Usuario registrado con éxito."
+
+    def iniciar_sesion(self, username, password):
+        if username in self.jugadores and self.jugadores[username]["password"] == password:
+            return True, "Inicio de sesión correcto."
+        return False, "Usuario o contraseña incorrectos."
+
+    def registrar_victoria_global(self, username, rol):
+        if username in self.jugadores:
+            if rol == "Defensor":
+                self.jugadores[username]["victorias_defensor"] += 1
+            else:
+                self.jugadores[username]["victorias_atacante"] += 1
+            self.guardar_jugadores()
+
+
+# =====================================================================
+# 5. INTERFAZ GRÁFICA DEL MAPA DEL JUEGO Y CONDICIONES DE VICTORIA
+# =====================================================================
+class MapaJuego:
+    def __init__(self, root, defensor, faccion_def, atacante, faccion_ata, gestion_usuarios):
+        self.root = root
+        self.root.title("Defensa y Asalto de Base - Campo de Batalla")
+        self.root.geometry("1250x820")
+
+        self.defensor        = defensor
+        self.faccion_def     = faccion_def
+        self.atacante        = atacante
+        self.faccion_ata     = faccion_ata
+        self.gestion_usuarios = gestion_usuarios
+
+        # --- MARCADOR DE RONDAS ---
+        self.ronda_actual      = 1
+        self.rondas_ganadas_def = 0
+        self.rondas_ganadas_ata = 0
+
+        # --- ECONOMÍA (se acumula entre rondas) ---
+        self.dinero_defensor = 0
+        self.dinero_atacante = 0
+        self.monto_inicial_ronda       = 300   # dinero base que se suma al inicio de cada ronda
+        self.oro_extra_atacante        = 0     # daño acumulado en la ronda anterior → oro extra
+        # Dinero que tenía el atacante al INICIAR la fase de combate.
+        # El oro ganado en combate se guarda para la siguiente ronda, no sirve para comprar ahora.
+        self.dinero_atk_inicio_combate = 0
+
+        # --- FASE SECUENCIAL ---
+        self.fase_ronda = "CONSTRUCCION_DEF"
+
+        # --- TABLERO ---
+        self.FILAS    = 10
+        self.COLUMNAS = 10
+        self.matriz_logica  = [["L"] * self.COLUMNAS for _ in range(self.FILAS)]
+        self.base_central_obj = BaseCentral(self.faccion_def)
+        self.matriz_logica[4][4] = self.base_central_obj
+        self.matriz_botones = [[None] * self.COLUMNAS for _ in range(self.FILAS)]
+
+        # --- HERRAMIENTAS SELECCIONADAS ---
+        self.herramienta_defensor = tk.StringVar(value="Muro")
+        self.herramienta_atacante = tk.StringVar(value="U_Soldado")
+
+        # --- TURNO DE COMBATE ---
+        self.turno_combate      = 0
+        self.dano_base_ronda    = 0   # daño total infligido a la base en esta ronda
+        self.dano_torres_ronda  = 0   # daño total a torres (para oro del atacante)
+
+        self.crear_interfaz_mapa()
+        self.ejecutar_paso_flujo()
+
+    # ------------------------------------------------------------------ #
+    #   CONSTRUCCIÓN DE LA INTERFAZ                                        #
+    # ------------------------------------------------------------------ #
+    def crear_interfaz_mapa(self):
+        # Cabecera
+        panel_superior = tk.Frame(self.root, bg="#2C3E50", pady=8)
+        panel_superior.pack(fill="x")
+
+        self.lbl_economia = tk.Label(panel_superior, text="", font=("Arial", 10, "bold"),
+                                     fg="#FFD700", bg="#2C3E50")
+        self.lbl_economia.pack()
+
+        self.lbl_fase_info = tk.Label(panel_superior, text="", font=("Arial", 12, "bold"),
+                                      fg="#E74C3C", bg="#2C3E50")
+        self.lbl_fase_info.pack(pady=2)
+
+        # Panel lateral derecho
+        panel_lateral = tk.Frame(self.root, padx=8, pady=8, bd=1, relief="groove")
+        panel_lateral.pack(side="right", fill="y", padx=10, pady=10)
+
+        # Botón de avance de fase
+        self.btn_accion_fase = tk.Button(
+            panel_lateral, text="Finalizar Construcción",
+            bg="#D35400", fg="white", font=("Arial", 10, "bold"),
+            pady=6, command=self.avanzar_fase_secuencial
+        )
+        self.btn_accion_fase.pack(fill="x", pady=8)
+
+        # Menú defensor
+        self.marco_def = tk.LabelFrame(panel_lateral, text="Menú Defensor", padx=5, pady=5)
+        self.marco_def.pack(fill="x", pady=4)
+        tk.Radiobutton(self.marco_def, text="Muro (20)",          variable=self.herramienta_defensor, value="Muro").pack(anchor="w")
+        tk.Radiobutton(self.marco_def, text="Torre Básica (50)",  variable=self.herramienta_defensor, value="T_Basica").pack(anchor="w")
+        tk.Radiobutton(self.marco_def, text="Torre Pesada (120)", variable=self.herramienta_defensor, value="T_Pesada").pack(anchor="w")
+        tk.Radiobutton(self.marco_def, text="Torre Mágica (90)",  variable=self.herramienta_defensor, value="T_Magica").pack(anchor="w")
+
+        # Menú atacante
+        self.marco_atk = tk.LabelFrame(panel_lateral, text="Menú Atacante", padx=5, pady=5)
+        self.marco_atk.pack(fill="x", pady=4)
+        tk.Radiobutton(self.marco_atk, text="Soldado (30)",    variable=self.herramienta_atacante, value="U_Soldado").pack(anchor="w")
+        tk.Radiobutton(self.marco_atk, text="Tanque (100)",    variable=self.herramienta_atacante, value="U_Tanque").pack(anchor="w")
+        tk.Radiobutton(self.marco_atk, text="U. Rápida (55)",  variable=self.herramienta_atacante, value="U_Rapida").pack(anchor="w")
+
+        # Panel de combate por turnos
+        self.marco_combate_sim = tk.LabelFrame(panel_lateral, text="⚔️ Combate por Turnos", padx=5, pady=5)
+        self.marco_combate_sim.pack(fill="x", pady=4)
+
+        self.btn_siguiente_turno = tk.Button(
+            self.marco_combate_sim, text="▶ Siguiente Turno",
+            bg="#8E44AD", fg="white", font=("Arial", 10, "bold"),
+            command=self.ejecutar_turno_combate
+        )
+        self.btn_siguiente_turno.pack(fill="x", pady=3)
+
+        self.lbl_turno = tk.Label(self.marco_combate_sim, text="Turno: 0",
+                                  font=("Arial", 9), fg="#555")
+        self.lbl_turno.pack()
+
+        # Log de combate
+        marco_log = tk.LabelFrame(panel_lateral, text="Log de combate", padx=4, pady=4)
+        marco_log.pack(fill="both", expand=True, pady=4)
+
+        self.txt_log = tk.Text(marco_log, width=30, height=14, font=("Courier", 8),
+                               state="disabled", bg="#1C2833", fg="#ECF0F1", wrap="word")
+        scroll = tk.Scrollbar(marco_log, command=self.txt_log.yview)
+        self.txt_log.configure(yscrollcommand=scroll.set)
+        self.txt_log.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        # Tablero de juego
+        tablero_frame = tk.Frame(self.root, bd=2, relief="solid")
+        tablero_frame.pack(side="left", padx=15, pady=15)
+
+        for f in range(self.FILAS):
+            for c in range(self.COLUMNAS):
+                elem = self.matriz_logica[f][c]
+                if isinstance(elem, BaseCentral):
+                    texto, color = f"BASE\nV:{elem.vida}", "#FFD700"
+                else:
+                    texto, color = f"{f},{c}", "#F5F5F5"
+
+                btn = tk.Button(
+                    tablero_frame, text=texto, width=7, height=3,
+                    bg=color, font=("Arial", 7),
+                    command=lambda fila=f, col=c: self.casilla_clickeada(fila, col)
+                )
+                btn.grid(row=f, column=c, padx=1, pady=1)
+                self.matriz_botones[f][c] = btn
+
+    # ------------------------------------------------------------------ #
+    #   LOG                                                                #
+    # ------------------------------------------------------------------ #
+    def log(self, texto):
+        self.txt_log.configure(state="normal")
+        self.txt_log.insert("end", texto + "\n")
+        self.txt_log.see("end")
+        self.txt_log.configure(state="disabled")
+
+    def log_separador(self):
+        self.log("─" * 30)
+
+    # ------------------------------------------------------------------ #
+    #   CONTROLADOR SECUENCIAL DE FASES                                    #
+    # ------------------------------------------------------------------ #
+    def ejecutar_paso_flujo(self):
+        if self.fase_ronda == "CONSTRUCCION_DEF":
+            # Paso 1: El defensor recibe dinero (acumulado + base)
+            self.dinero_defensor += self.monto_inicial_ronda
+            self.lbl_fase_info.config(
+                text=f"Fase: Construcción del Defensor [{self.defensor}]", fg="#3498DB")
+            self.btn_accion_fase.config(text="Finalizar Construcción 🛡️",
+                                        state="normal", bg="#2980B9")
+            self.marco_def.config(fg="green")
+            self.marco_atk.config(fg="gray")
+            self.bloquear_marcos(self.marco_combate_sim)
+
+        elif self.fase_ronda == "DESPLIEGUE_ATK":
+            # Paso 3: El atacante recibe dinero (acumulado + base + oro extra de ronda anterior)
+            self.dinero_atacante += self.monto_inicial_ronda + self.oro_extra_atacante
+            if self.oro_extra_atacante > 0:
+                self.log(f"💰 Atacante recibe +{self.oro_extra_atacante} oro extra (daño ronda anterior)")
+            self.oro_extra_atacante = 0
+
+            self.lbl_fase_info.config(
+                text=f"Fase: Despliegue del Atacante [{self.atacante}]", fg="#E74C3C")
+            self.btn_accion_fase.config(text="Iniciar Combate ⚔️",
+                                        state="normal", bg="#C0392B")
+            self.marco_def.config(fg="gray")
+            self.marco_atk.config(fg="red")
+            self.bloquear_marcos(self.marco_combate_sim)
+
+        elif self.fase_ronda == "COMBATE":
+            # Paso 5
+            self.turno_combate   = 0
+            self.dano_base_ronda = 0
+            # Guardar cuánto dinero tenía el atacante antes de empezar el combate.
+            # El oro ganado durante el combate NO cuenta para comprar unidades nuevas esta ronda.
+            self.dinero_atk_inicio_combate = self.dinero_atacante
+            self.lbl_fase_info.config(text="¡Fase de Combate! — Presiona ▶ Siguiente Turno",
+                                      fg="#E67E22")
+            self.btn_accion_fase.config(text="Combatiendo...", state="disabled", bg="#7F8C8D")
+            self.marco_def.config(fg="gray")
+            self.marco_atk.config(fg="gray")
+            self.desbloquear_marcos(self.marco_combate_sim)
+            self.log_separador()
+            self.log(f"🔔 Ronda {self.ronda_actual} — COMBATE")
+            self.log_separador()
+            self.verificar_condiciones_victoria_ronda()
+
+        self.actualizar_marcador_pantalla()
+
+    def avanzar_fase_secuencial(self):
+        if self.fase_ronda == "CONSTRUCCION_DEF":
+            self.fase_ronda = "DESPLIEGUE_ATK"
+        elif self.fase_ronda == "DESPLIEGUE_ATK":
+            self.fase_ronda = "COMBATE"
+        self.ejecutar_paso_flujo()
+
+    def bloquear_marcos(self, *marcos):
+        for m in marcos:
+            for w in m.winfo_children():
+                try: w.configure(state="disabled")
+                except: pass
+
+    def desbloquear_marcos(self, *marcos):
+        for m in marcos:
+            for w in m.winfo_children():
+                try: w.configure(state="normal")
+                except: pass
+
+    # ------------------------------------------------------------------ #
+    #   HELPERS PARA RECORRER EL MAPA                                      #
+    # ------------------------------------------------------------------ #
+    def obtener_unidades(self):
+        """Devuelve lista de (fila, col, UnidadAtacante) presentes en el tablero."""
+        resultado = []
+        for f in range(self.FILAS):
+            for c in range(self.COLUMNAS):
+                if isinstance(self.matriz_logica[f][c], UnidadAtacante):
+                    resultado.append((f, c, self.matriz_logica[f][c]))
+        return resultado
+
+    def obtener_torres(self):
+        """Devuelve lista de (fila, col, Torre) presentes en el tablero."""
+        resultado = []
+        for f in range(self.FILAS):
+            for c in range(self.COLUMNAS):
+                if isinstance(self.matriz_logica[f][c], Torre):
+                    resultado.append((f, c, self.matriz_logica[f][c]))
+        return resultado
+
+    def count_unidades_atacantes(self):
+        return len(self.obtener_unidades())
+
+    # ------------------------------------------------------------------ #
+    #   COMBATE POR TURNOS                                                 #
+    # ------------------------------------------------------------------ #
+    def ejecutar_turno_combate(self):
+        """Lógica completa de un turno de combate."""
+        if self.fase_ronda != "COMBATE":
+            return
+
+        self.turno_combate += 1
+        self.lbl_turno.config(text=f"Turno: {self.turno_combate}")
+        self.log(f"\n--- Turno {self.turno_combate} ---")
+
+        unidades     = self.obtener_unidades()
+        torres       = self.obtener_torres()
+        solo_unidades = [u for _, _, u in unidades]
+        solo_torres   = [t for _, _, t in torres]
+
+        # 1) Torres atacan a unidades (ataque normal)
+        for (tf, tc, torre) in torres:
+            if not solo_unidades:
+                break
+            objetivo = solo_unidades[0]
+            objetivo.vida -= torre.daño
+            self.log(f"🗼 [{torre.nombre}] ataca a {objetivo.nombre} -{torre.daño} HP")
+            # Avanza cooldown y dispara habilidad si está lista
+            torre.avanzar_turno()
+            dano_hab = torre.activar_habilidad(solo_unidades, self.log)
+            # El defensor gana oro por daño de habilidades (daño extra = recompensa simbólica)
+            if dano_hab > 0:
+                recompensa_def = dano_hab // 5
+                self.dinero_defensor += recompensa_def
+
+        # 2) Unidades avanzan y atacan la base o torres
+        for (uf, uc, unidad) in list(unidades):   # copia para poder eliminar
+            unidad.avanzar_turno()
+
+            # Calcular velocidad real (con bonus si aplica)
+            vel = unidad.velocidad
+            if hasattr(unidad, 'bonus_velocidad') and unidad.bonus_velocidad > 0:
+                vel += unidad.bonus_velocidad
+                unidad.bonus_velocidad = 0
+
+            # Si hay torres en el camino, ataca la primera que encuentre
+            if solo_torres:
+                torre_objetivo = solo_torres[0]
+                torre_objetivo.vida -= unidad.daño
+                self.dano_torres_ronda += unidad.daño
+                # Atacante gana oro por dañar torres
+                oro_ganado = unidad.daño // 4
+                self.dinero_atacante += oro_ganado
+                self.log(f"⚔️  [{unidad.nombre}] ataca torre {torre_objetivo.nombre} -{unidad.daño} HP (+{oro_ganado} oro atacante)")
+                if torre_objetivo.vida <= 0:
+                    # Torre destruida → oro extra al atacante
+                    self.dinero_atacante += 30
+                    self.log(f"🔥 Torre {torre_objetivo.nombre} DESTRUIDA! (+30 oro atacante)")
+                    # Buscar y limpiar casilla de la torre destruida
+                    for (ttf, ttc, tt) in torres:
+                        if tt is torre_objetivo:
+                            self.matriz_logica[ttf][ttc] = "L"
+                            self.matriz_botones[ttf][ttc].config(
+                                text=f"{ttf},{ttc}", bg="#F5F5F5", fg="black")
+                    solo_torres.remove(torre_objetivo)
+            else:
+                # Sin torres → ataca la base directamente
+                self.base_central_obj.vida -= unidad.daño
+                self.dano_base_ronda       += unidad.daño
+                # Atacante gana oro por dañar la base
+                oro_base = unidad.daño // 3
+                self.dinero_atacante += oro_base
+                self.log(f"💣 [{unidad.nombre}] ataca BASE -{unidad.daño} HP (+{oro_base} oro)")
+                self.matriz_botones[4][4].config(
+                    text=f"BASE\nV:{max(self.base_central_obj.vida,0)}")
+
+            # Habilidad especial de la unidad
+            unidad.activar_habilidad(self.base_central_obj, self.log)
+            if self.base_central_obj.vida < 0:
+                self.base_central_obj.vida = 0
+
+        # 3) Movimiento: unidades avanzan hacia la base (se mueven hacia col 4, fila 4)
+        self._mover_unidades()
+
+        # 4) Eliminar unidades muertas y dar oro al defensor
+        self._eliminar_unidades_muertas()
+
+        # 5) Actualizar botones de unidades vivas
+        self._refrescar_botones_unidades()
+
+        # 6) Actualizar botón de la base
+        if self.base_central_obj.vida > 0:
+            self.matriz_botones[4][4].config(
+                text=f"BASE\nV:{self.base_central_obj.vida}", bg="#FFD700")
+
+        self.actualizar_marcador_pantalla()
+        self.verificar_condiciones_victoria_ronda()
+
+    def _mover_unidades(self):
+        """Mueve cada unidad un paso hacia la base central (4,4)."""
+        unidades = self.obtener_unidades()
+        # Procesar de más cerca a más lejos para evitar colisiones
+        unidades.sort(key=lambda x: abs(x[0]-4) + abs(x[1]-4))
+
+        for (f, c, unidad) in unidades:
+            vel = unidad.velocidad
+            if hasattr(unidad, 'bonus_velocidad') and unidad.bonus_velocidad > 0:
+                vel += unidad.bonus_velocidad
+                unidad.bonus_velocidad = 0
+
+            nueva_f, nueva_c = f, c
+            for _ in range(vel):
+                df = nueva_f - 4
+                dc = nueva_c - 4
+                if df == 0 and dc == 0:
+                    break
+                # Mover en la dirección de mayor distancia
+                if abs(df) >= abs(dc):
+                    siguiente_f = nueva_f + (-1 if df > 0 else 1)
+                    siguiente_c = nueva_c
+                else:
+                    siguiente_f = nueva_f
+                    siguiente_c = nueva_c + (-1 if dc > 0 else 1)
+
+                # Verificar que la casilla destino esté libre (o sea la base)
+                destino = self.matriz_logica[siguiente_f][siguiente_c]
+                if destino == "L" or isinstance(destino, BaseCentral):
+                    nueva_f, nueva_c = siguiente_f, siguiente_c
+                else:
+                    break   # bloqueado por muro u otra estructura
+
+            # Si se movió, actualizar matriz
+            if (nueva_f, nueva_c) != (f, c) and not isinstance(
+                    self.matriz_logica[nueva_f][nueva_c], BaseCentral):
+                self.matriz_logica[f][c]           = "L"
+                self.matriz_botones[f][c].config(text=f"{f},{c}", bg="#F5F5F5", fg="black")
+                self.matriz_logica[nueva_f][nueva_c] = unidad
+
+    def _eliminar_unidades_muertas(self):
+        """Elimina del tablero las unidades con vida <= 0 y da oro al defensor."""
+        for f in range(self.FILAS):
+            for c in range(self.COLUMNAS):
+                elem = self.matriz_logica[f][c]
+                if isinstance(elem, UnidadAtacante) and elem.vida <= 0:
+                    # Recompensa al defensor según tipo de unidad
+                    if isinstance(elem, Tanque):
+                        oro = 50
+                    elif isinstance(elem, UnidadRapida):
+                        oro = 25
+                    else:
+                        oro = 15
+                    self.dinero_defensor += oro
+                    self.log(f"💀 {elem.nombre} eliminado → defensor +{oro} oro")
+                    self.matriz_logica[f][c] = "L"
+                    self.matriz_botones[f][c].config(text=f"{f},{c}", bg="#F5F5F5", fg="black")
+
+    def _refrescar_botones_unidades(self):
+        """Actualiza el texto de los botones de unidades vivas."""
+        for f in range(self.FILAS):
+            for c in range(self.COLUMNAS):
+                elem = self.matriz_logica[f][c]
+                if isinstance(elem, UnidadAtacante):
+                    self.matriz_botones[f][c].config(
+                        text=f"{elem.nombre[:6]}\nV:{max(elem.vida,0)}",
+                        bg="#E74C3C", fg="white")
+
+    # ------------------------------------------------------------------ #
+    #   CONDICIONES DE VICTORIA                                            #
+    # ------------------------------------------------------------------ #
+    def _atacante_puede_seguir(self):
+        """Devuelve True si el atacante aún tiene unidades vivas en el mapa.
+        El dinero ganado en combate se reserva para la siguiente ronda,
+        por lo que no sirve para determinar si puede seguir comprando ahora."""
+        return self.count_unidades_atacantes() > 0
+
+    def verificar_condiciones_victoria_ronda(self):
+        if self.fase_ronda != "COMBATE":
+            return
+
+        unidades_vivas = self.count_unidades_atacantes()
+
+        # Victoria del atacante: base destruida
+        if self.base_central_obj.vida <= 0:
+            self.base_central_obj.vida = 0
+            self.matriz_botones[4][4].config(text="BASE\nDESTRUIDA", bg="#7F8C8D")
+            self.btn_siguiente_turno.config(state="disabled")
+            self.resolver_fin_ronda("Atacante")
+            return
+
+        # Victoria del defensor:
+        # No quedan unidades en el mapa Y la base sigue en pie.
+        # (El dinero ganado en combate no permite comprar más unidades en esta ronda.)
+        if not self._atacante_puede_seguir() and self.base_central_obj.vida > 0:
+            self.btn_siguiente_turno.config(state="disabled")
+            self.resolver_fin_ronda("Defensor")
+
+    def resolver_fin_ronda(self, ganador_ronda):
+        # Guardar oro extra para el atacante en la siguiente ronda
+        self.oro_extra_atacante = self.dano_base_ronda // 10
+
+        if ganador_ronda == "Defensor":
+            self.rondas_ganadas_def += 1
+            msg = (f"🛡️ ¡Ronda ganada por el Defensor [{self.defensor}]!\n"
+                   f"Motivo: El atacante se quedó sin recursos ni unidades.")
+        else:
+            self.rondas_ganadas_ata += 1
+            msg = (f"⚔️ ¡Ronda ganada por el Atacante [{self.atacante}]!\n"
+                   f"Motivo: La Base Central fue destruida.")
+
+        messagebox.showinfo("Resultado de la Ronda", msg)
+        self.actualizar_marcador_pantalla()
+
+        if self.rondas_ganadas_def == 3:
+            messagebox.showinfo("🏆 FIN DE LA PARTIDA 🏆",
+                                f"¡{self.defensor} gana la partida como DEFENSOR!")
+            self.gestion_usuarios.registrar_victoria_global(self.defensor, "Defensor")
+            self.root.destroy()
+            return
+        elif self.rondas_ganadas_ata == 3:
+            messagebox.showinfo("🏆 FIN DE LA PARTIDA 🏆",
+                                f"¡{self.atacante} gana la partida como ATACANTE!")
+            self.gestion_usuarios.registrar_victoria_global(self.atacante, "Atacante")
+            self.root.destroy()
+            return
+
+        self.preparar_nueva_ronda()
+
+    def preparar_nueva_ronda(self):
+        self.ronda_actual += 1
+        self.fase_ronda   = "CONSTRUCCION_DEF"
+        self.dano_base_ronda        = 0
+        self.dano_torres_ronda      = 0
+        self.dinero_atk_inicio_combate = 0
+
+        # Restablecer el botón de turno por si quedó bloqueado al terminar la ronda anterior
+        self.btn_siguiente_turno.config(state="normal")
+
+        self.base_central_obj.vida = 500
+        for f in range(self.FILAS):
+            for c in range(self.COLUMNAS):
+                if f == 4 and c == 4:
+                    self.matriz_logica[4][4] = self.base_central_obj
+                    self.matriz_botones[4][4].config(text="BASE\nV:500", bg="#FFD700", fg="black")
+                else:
+                    self.matriz_logica[f][c] = "L"
+                    self.matriz_botones[f][c].config(text=f"{f},{c}", bg="#F5F5F5", fg="black")
+
+        self.log_separador()
+        self.log(f"🔄 Iniciando Ronda {self.ronda_actual}")
+        self.ejecutar_paso_flujo()
+
+    # ------------------------------------------------------------------ #
+    #   CLIC EN CASILLA                                                    #
+    # ------------------------------------------------------------------ #
+    def casilla_clickeada(self, f, c):
+        if isinstance(self.matriz_logica[f][c], BaseCentral):
+            messagebox.showwarning("Inválido", "La Base Central no se puede modificar.")
+            return
+        if self.matriz_logica[f][c] != "L":
+            messagebox.showwarning("Ocupado", "Casilla ocupada.")
+            return
+
+        if self.fase_ronda == "CONSTRUCCION_DEF":
+            tipo = self.herramienta_defensor.get()
+            mapa_construccion = {
+                "Muro":    Muro(self.faccion_def),
+                "T_Basica": TorreBasica(self.faccion_def),
+                "T_Pesada": TorrePesada(self.faccion_def),
+                "T_Magica": TorreMagica(self.faccion_def),
+            }
+            obj = mapa_construccion.get(tipo)
+            if obj and self.dinero_defensor >= obj.costo:
+                self.dinero_defensor -= obj.costo
+                self.matriz_logica[f][c] = obj
+                if tipo == "Muro":
+                    self.matriz_botones[f][c].config(text="MURO", bg="#95A5A6", fg="white")
+                else:
+                    self.matriz_botones[f][c].config(
+                        text=f"{obj.nombre[:6]}\nV:{obj.vida}", bg="#3498DB", fg="white")
+            elif obj:
+                messagebox.showerror("Oro Insuficiente", "No tienes suficiente oro.")
+
+        elif self.fase_ronda == "DESPLIEGUE_ATK":
+            tipo = self.herramienta_atacante.get()
+            mapa_unidades = {
+                "U_Soldado": SoldadoBasico(self.faccion_ata),
+                "U_Tanque":  Tanque(self.faccion_ata),
+                "U_Rapida":  UnidadRapida(self.faccion_ata),
+            }
+            obj = mapa_unidades.get(tipo)
+            if obj and self.dinero_atacante >= obj.costo:
+                self.dinero_atacante -= obj.costo
+                self.matriz_logica[f][c] = obj
+                self.matriz_botones[f][c].config(
+                    text=f"{obj.nombre[:6]}\nV:{obj.vida}", bg="#E74C3C", fg="white")
+            elif obj:
+                messagebox.showerror("Oro Insuficiente", "No puedes costear esta unidad.")
+
+        self.actualizar_marcador_pantalla()
+
+    # ------------------------------------------------------------------ #
+    #   MARCADOR EN PANTALLA                                               #
+    # ------------------------------------------------------------------ #
+    def actualizar_marcador_pantalla(self):
+        self.lbl_economia.config(
+            text=(f"Ronda: {self.ronda_actual}  |  "
+                  f"Marcador: 🛡️ {self.rondas_ganadas_def} — {self.rondas_ganadas_ata} ⚔️  |  "
+                  f"Oro Def: {self.dinero_defensor}  |  Oro Atk: {self.dinero_atacante}")
+        )
+
+
+# =====================================================================
+# 6. SELECCIÓN DE FACCIONES
+# =====================================================================
+class VentanaFacciones:
+    def __init__(self, root, jugador_defensor, jugador_atacante, gestion_usuarios):
+        self.root = root
+        self.root.title("Selección de Facciones")
+        self.root.geometry("520x380")
+        self.defensor        = jugador_defensor
+        self.atacante        = jugador_atacante
+        self.gestion_usuarios = gestion_usuarios
+        self.nombre_fac_def  = tk.StringVar(value="Seleccionar")
+        self.nombre_fac_ata  = tk.StringVar(value="Seleccionar")
+        self.opciones_nombres = [f.nombre for f in LISTA_FACCIONES]
+        self.crear_interfaz()
+
+    def crear_interfaz(self):
+        tk.Label(self.root, text="¡Seleccionen sus Facciones!",
+                 font=("Arial", 14, "bold")).pack(pady=15)
+
+        marco_def = tk.LabelFrame(self.root, text=f"Defensor: {self.defensor}",
+                                  padx=10, pady=10)
+        marco_def.pack(pady=8, fill="x", padx=20)
+        tk.Label(marco_def, text="Facción:").pack(side="left")
+        tk.OptionMenu(marco_def, self.nombre_fac_def, *self.opciones_nombres,
+                      command=self.act_ventaja_def).pack(side="left", padx=10)
+        self.lbl_v_def = tk.Label(marco_def, text="", font=("Arial", 9, "italic"), fg="purple")
+        self.lbl_v_def.pack(side="left")
+
+        marco_ata = tk.LabelFrame(self.root, text=f"Atacante: {self.atacante}",
+                                  padx=10, pady=10)
+        marco_ata.pack(pady=8, fill="x", padx=20)
+        tk.Label(marco_ata, text="Facción:").pack(side="left")
+        tk.OptionMenu(marco_ata, self.nombre_fac_ata, *self.opciones_nombres,
+                      command=self.act_ventaja_ata).pack(side="left", padx=10)
+        self.lbl_v_ata = tk.Label(marco_ata, text="", font=("Arial", 9, "italic"), fg="purple")
+        self.lbl_v_ata.pack(side="left")
+
+        tk.Button(self.root, text="Confirmar y Jugar", bg="#4CAF50", fg="white",
+                  font=("Arial", 11, "bold"), command=self.validar).pack(pady=20)
+
+    def buscar_faccion(self, nombre):
+        for f in LISTA_FACCIONES:
+            if f.nombre == nombre: return f
+        return None
+
+    def act_ventaja_def(self, sel):
+        f = self.buscar_faccion(sel)
+        if f: self.lbl_v_def.config(text=f.ventaja)
+
+    def act_ventaja_ata(self, sel):
+        f = self.buscar_faccion(sel)
+        if f: self.lbl_v_ata.config(text=f.ventaja)
+
+    def validar(self):
+        n_def = self.nombre_fac_def.get()
+        n_ata = self.nombre_fac_ata.get()
+        if n_def == "Seleccionar" or n_ata == "Seleccionar":
+            messagebox.showerror("Error", "Ambos jugadores deben elegir una facción.")
+            return
+        if n_def == n_ata:
+            messagebox.showerror("Restricción", "No se puede seleccionar la misma facción.")
+            return
+        obj_def = self.buscar_faccion(n_def)
+        obj_ata = self.buscar_faccion(n_ata)
+        self.root.destroy()
+        mapa_raiz = tk.Tk()
+        MapaJuego(mapa_raiz, self.defensor, obj_def, self.atacante, obj_ata, self.gestion_usuarios)
+        mapa_raiz.mainloop()
+
+
+# =====================================================================
+# TOP 5 RANKINGS
+# =====================================================================
+class VentanaRankings:
+    def __init__(self, parent_root, gestion_usuarios):
+        self.win = tk.Toplevel(parent_root)
+        self.win.title("Top 5 - Tabla de Clasificación")
+        self.win.geometry("450x420")
+        self.gestion = gestion_usuarios
+        self.crear_interfaz()
+
+    def crear_interfaz(self):
+        tk.Label(self.win, text="🏆 TOP 5 JUGADORES 🏆",
+                 font=("Arial", 13, "bold"), fg="#2C3E50").pack(pady=10)
+
+        datos = list(self.gestion.jugadores.items())
+        top_def = sorted(datos, key=lambda x: x[1].get("victorias_defensor", 0), reverse=True)[:5]
+        top_atk = sorted(datos, key=lambda x: x[1].get("victorias_atacante", 0), reverse=True)[:5]
+
+        m_def = tk.LabelFrame(self.win, text="Mejores Defensores",
+                              font=("Arial", 10, "bold"), padx=10, pady=5)
+        m_def.pack(fill="both", expand=True, padx=15, pady=5)
+        for i, (usr, info) in enumerate(top_def, 1):
+            tk.Label(m_def, text=f"{i}. {usr} — {info.get('victorias_defensor', 0)} victorias",
+                     font=("Courier", 10)).pack(anchor="w")
+
+        m_atk = tk.LabelFrame(self.win, text="Mejores Atacantes",
+                              font=("Arial", 10, "bold"), padx=10, pady=5)
+        m_atk.pack(fill="both", expand=True, padx=15, pady=5)
+        for i, (usr, info) in enumerate(top_atk, 1):
+            tk.Label(m_atk, text=f"{i}. {usr} — {info.get('victorias_atacante', 0)} victorias",
+                     font=("Courier", 10)).pack(anchor="w")
+
+        tk.Button(self.win, text="Cerrar", bg="#7F8C8D", fg="white",
+                  command=self.win.destroy).pack(pady=10)
+
+
+# =====================================================================
+# 7. LOGIN Y REGISTRO
+# =====================================================================
+class VentanaLogin:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Defensa y Asalto de Base - Inicio")
+        self.root.geometry("400x500")
+        self.gestion          = GestionUsuarios()
+        self.jugador_defensor = None
+        self.jugador_atacante = None
+        self.var_usuario      = tk.StringVar()
+        self.var_contra       = tk.StringVar()
+        self.crear_interfaz()
+
+    def crear_interfaz(self):
+        tk.Label(self.root, text="Registro / Login",
+                 font=("Arial", 16, "bold")).pack(pady=20)
+
+        self.lbl_estado = tk.Label(
+            self.root, text="Inicie sesión para el JUGADOR 1 (DEFENSOR)",
+            font=("Arial", 10, "italic"), fg="blue")
+        self.lbl_estado.pack(pady=5)
+
+        tk.Label(self.root, text="Nombre de Usuario:").pack(pady=5)
+        tk.Entry(self.root, textvariable=self.var_usuario,
+                 font=("Arial", 11)).pack(pady=5)
+
+        tk.Label(self.root, text="Contraseña:").pack(pady=5)
+        tk.Entry(self.root, textvariable=self.var_contra,
+                 show="*", font=("Arial", 11)).pack(pady=5)
+
+        tk.Button(self.root, text="Iniciar Sesión", width=18,
+                  bg="#4CAF50", fg="white", command=self.procesar_login).pack(pady=5)
+        tk.Button(self.root, text="Registrarse", width=18,
+                  bg="#2196F3", fg="white", command=self.procesar_registro).pack(pady=5)
+
+        tk.Button(self.root, text="🏆 Ver Tabla de Posiciones", width=22,
+                  bg="#F39C12", fg="white", font=("Arial", 9, "bold"),
+                  command=lambda: VentanaRankings(self.root, self.gestion)).pack(pady=10)
+
+        self.lbl_listos = tk.Label(self.root,
+                                   text="Defensor: --  |  Atacante: --",
+                                   font=("Arial", 10, "bold"), pady=15)
+        self.lbl_listos.pack()
+
+    def procesar_registro(self):
+        u = self.var_usuario.get().strip()
+        c = self.var_contra.get().strip()
+        exito, msg = self.gestion.registrar_usuario(u, c)
+        if exito:
+            messagebox.showinfo("Éxito", msg)
+            self.limpiar()
+        else:
+            messagebox.showerror("Error", msg)
+
+    def procesar_login(self):
+        u = self.var_usuario.get().strip()
+        c = self.var_contra.get().strip()
+        exito, msg = self.gestion.iniciar_sesion(u, c)
+        if not exito:
+            messagebox.showerror("Error", msg)
+            return
+        if u == self.jugador_defensor or u == self.jugador_atacante:
+            messagebox.showwarning("Advertencia", "Este jugador ya está autenticado.")
+            return
+
+        if not self.jugador_defensor:
+            self.jugador_defensor = u
+            messagebox.showinfo("Éxito", f"{u} ingresará como DEFENSOR.")
+            self.lbl_estado.config(text="Inicie sesión para el JUGADOR 2 (ATACANTE)")
+        elif not self.jugador_atacante:
+            self.jugador_atacante = u
+            messagebox.showinfo("Éxito", f"{u} ingresará como ATACANTE.")
+
+        self.act_etiqueta()
+        self.limpiar()
+
+        if self.jugador_defensor and self.jugador_atacante:
+            def_f, atk_f = self.jugador_defensor, self.jugador_atacante
+            self.root.destroy()
+            fac_raiz = tk.Tk()
+            VentanaFacciones(fac_raiz, def_f, atk_f, self.gestion)
+            fac_raiz.mainloop()
+
+    def act_etiqueta(self):
+        d = self.jugador_defensor if self.jugador_defensor else "--"
+        a = self.jugador_atacante if self.jugador_atacante else "--"
+        self.lbl_listos.config(text=f"Defensor: {d}  |  Atacante: {a}")
+
+    def limpiar(self):
+        self.var_usuario.set("")
+        self.var_contra.set("")
+
+
+# =====================================================================
+# BLOQUE PRINCIPAL
+# =====================================================================
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = VentanaLogin(root)
+    root.mainloop()
